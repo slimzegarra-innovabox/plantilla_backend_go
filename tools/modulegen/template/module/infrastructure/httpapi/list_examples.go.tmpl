@@ -1,0 +1,22 @@
+package httpapi
+
+import (
+	"github.com/gin-gonic/gin"
+
+	"myapp.v1.0.0/internal/example/application/dto"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+	sharedhttp "myapp.v1.0.0/internal/shared/infrastructure/httpapi"
+)
+
+// List atiende GET /api/v1/examples?page=1&size=20.
+func (h *ExampleHandler) List(c *gin.Context) {
+	page, ok := sharedhttp.PageQuery(c)
+	if !ok {
+		return
+	}
+	res, err := h.list.Execute(c.Request.Context(), dto.ListExamplesQuery{Page: page})
+	if !sharedhttp.Handle(c, res, err) {
+		return
+	}
+	sharedhttp.WritePage(c, shareddto.MapPage(res.Data(), toExampleResponse), res.Notifications())
+}

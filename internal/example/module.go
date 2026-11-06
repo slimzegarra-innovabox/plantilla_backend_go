@@ -1,0 +1,52 @@
+// Package example es la raíz de composición del módulo de ejemplo: el único
+// lugar que conoce a la vez los casos de uso y las implementaciones concretas.
+package example
+
+import (
+	"github.com/gin-gonic/gin"
+	"github.com/hibiken/asynq"
+
+	"myapp.v1.0.0/internal/example/application/port"
+	"myapp.v1.0.0/internal/example/application/usecase"
+	"myapp.v1.0.0/internal/example/infrastructure/httpapi"
+	"myapp.v1.0.0/internal/example/infrastructure/messaging"
+	"myapp.v1.0.0/internal/example/infrastructure/persistence"
+	"myapp.v1.0.0/internal/shared/infrastructure/module"
+)
+
+// Register arma el módulo (adapters → casos de uso → handler → rutas) y monta
+// sus rutas bajo api (/api/v1).
+func Register(api *gin.RouterGroup, deps module.Deps) {
+	RegisterWith(api, deps, Ports{
+		Repo:   persistence.NewExampleRepositoryAdapter(deps.DB),
+		Events: messaging.NewExampleEventPublisher(deps.Outbox),
+	})
+}
+
+// Ports son las implementaciones de los puertos del módulo.
+type Ports struct {
+	Repo   port.ExampleRepository
+	Events port.ExampleEventPublisher
+}
+
+// RegisterWith arma el módulo con los puertos indicados. Register le pasa los adapters
+// reales; las pruebas HTTP, dobles en memoria: así ejercitan este mismo cableado.
+func RegisterWith(api *gin.RouterGroup, deps module.Deps, ports Ports) {
+	repo, events := ports.Repo, ports.Events
+
+	handler := httpapi.NewExampleHandler(
+		usecase.NewCreateExampleUseCase(repo, deps.Clock),
+		usecase.NewGetExampleUseCase(repo),
+		usecase.NewListExamplesUseCase(repo),
+		usecase.NewUpdateExampleUseCase(repo, deps.Clock),
+		usecase.NewChangeExampleStatusUseCase(repo, events, deps.Tx, deps.Clock),
+		usecase.NewDeleteExampleUseCase(repo),
+	)
+	httpapi.RegisterRoutes(api, handler, deps.Auth, deps.Idempotent)
+}
+
+// RegisterTasks registra los handlers de las tareas del módulo en el worker
+// (cmd/worker/tasks.go). Los eventos llegan por el outbox.
+func RegisterTasks(mux *asynq.ServeMux, _ module.Deps) {
+	messaging.RegisterHandlers(mux)
+}

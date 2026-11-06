@@ -1,0 +1,131 @@
+# .golangci.yml — golangci-lint v2
+# Instalar: https://golangci-lint.run/welcome/install/
+# Ejecutar: make lint
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.26"
+  build-tags:
+    - integration  # también se lintean las pruebas de integración y pgtest
+
+linters:
+  default: none
+  enable:
+    # ── Corrección ──────────────────────────────────────────────────────────
+    - errcheck       # errores no manejados
+    - govet          # constructos sospechosos
+    - staticcheck    # análisis estático exhaustivo
+    - unused         # código sin uso
+    - bodyclose      # response bodies HTTP sin cerrar
+    - noctx          # peticiones HTTP sin context
+    - errorlint      # comparar errores con errors.Is/As, envolver con %w
+    - nilnil         # prohíbe `return nil, nil` (§6.3: «no encontrado» es explícito)
+    - contextcheck   # funciones que pierden el context recibido
+    - sqlclosecheck  # rows/stmt sin cerrar
+    - rowserrcheck   # rows.Err() sin comprobar
+
+    # ── Arquitectura ────────────────────────────────────────────────────────
+    - depguard       # D1/D2 en el editor; la regla completa la verifica test/architecture
+
+    # ── Estilo y legibilidad ────────────────────────────────────────────────
+    - revive
+    - unconvert
+    - whitespace
+    - gocritic
+
+    # ── Seguridad ───────────────────────────────────────────────────────────
+    - gosec
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+
+    depguard:
+      rules:
+        application:
+          list-mode: strict
+          files:
+            - "**/internal/*/application/**/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - myapp.v1.0.0/internal
+          deny:
+            - pkg: myapp.v1.0.0/internal/shared/infrastructure
+              desc: "application no puede importar infraestructura (CLAUDE.md §4 D1/D2)"
+
+    gosec:
+      excludes:
+        - G104  # duplica errcheck
+        - G115  # conversiones de enteros: demasiado ruidoso
+
+    revive:
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+    staticcheck:
+      checks:
+        - all
+        - -ST1000  # comentario de paquete en cada archivo
+        - -ST1003  # nomenclatura MixedCaps
+        - -ST1020  # comentarios de declaraciones exportadas
+        - -ST1021
+        - -ST1022
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+      # tools/ son herramientas de desarrollo que leen y escriben archivos del propio
+      # repositorio (rutas y permisos de código fuente, no datos de usuarios).
+      - path: ^tools/
+        linters: [gosec]
+        text: "G122|G301|G304|G306|G703"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - myapp.v1.0.0
+
+issues:
+  max-same-issues: 0

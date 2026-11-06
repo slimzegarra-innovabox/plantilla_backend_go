@@ -1,0 +1,161 @@
+name: Deploy
+
+# Construir una vez, promover la misma imagen (CLAUDE.md §17, docs/deploy.md):
+#   - push a main con CI en verde → publica api/worker/migrate en ECR (etiqueta = SHA)
+#     y despliega en QA;
+#   - producción: manual (Actions → Deploy → Run workflow) con la etiqueta ya probada
+#     en QA. Producción NUNCA reconstruye: despliega exactamente la imagen de QA.
+#
+# Credenciales por OIDC (sin claves de AWS en GitHub). Mientras no estén configuradas
+# las variables (vars.AWS_REGION, vars.ECR_REGISTRY…), el workflow se omite.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Entorno
+        type: choice
+        options: [qa, production]
+        required: true
+      tag:
+        description: Etiqueta ya publicada (SHA de 12 caracteres). Obligatoria en producción; vacía en QA = construir el commit elegido
+        type: string
+        required: false
+      rollback:
+        description: Volver a una versión anterior, sin ejecutar migraciones (exige la etiqueta)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'qa' }}
+  cancel-in-progress: false   # nunca se corta un despliegue a medias
+
+jobs:
+  resolve:
+    name: Qué se despliega
+    runs-on: ubuntu-latest
+    # Solo pushes a main con el CI en verde (no PRs ni forks), o una ejecución manual.
+    if: >-
+      vars.AWS_REGION != '' && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+      )
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      tag: ${{ steps.r.outputs.tag }}
+      ref: ${{ steps.r.outputs.ref }}
+      build: ${{ steps.r.outputs.build }}
+      skip_migrations: ${{ steps.r.outputs.skip_migrations }}
+    steps:
+      - id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_ENV: ${{ inputs.environment }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_ROLLBACK: ${{ inputs.rollback }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [[ "$EVENT" == "workflow_run" ]]; then
+            env=qa; sha="$RUN_SHA"; tag="${sha::12}"; build=true
+          else
+            env="$INPUT_ENV"; sha="$GITHUB_SHA"
+            if [[ -n "$INPUT_TAG" ]]; then
+              [[ "$INPUT_TAG" =~ ^[0-9a-f]{12}$ ]] || { echo "::error::tag debe ser un SHA de 12 caracteres hexadecimales"; exit 1; }
+              tag="$INPUT_TAG"; build=false
+            elif [[ "$env" == "production" ]]; then
+              echo "::error::producción exige la etiqueta ya probada en QA (no se reconstruye)"; exit 1
+            else
+              tag="${sha::12}"; build=true
+            fi
+          fi
+          skip_migrations=false
+          if [[ "$INPUT_ROLLBACK" == "true" ]]; then
+            [[ -n "$INPUT_TAG" ]] || { echo "::error::volver a una versión anterior exige su etiqueta"; exit 1; }
+            skip_migrations=true
+          fi
+          { echo "environment=$env"; echo "tag=$tag"; echo "ref=$sha"; echo "build=$build"; echo "skip_migrations=$skip_migrations"; } >>"$GITHUB_OUTPUT"
+          echo "### Despliegue: \`$tag\` → **$env** (construir: $build, sin migraciones: $skip_migrations)" >>"$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publicar imágenes en ECR
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC hacia AWS
+    env:
+      REGISTRY: ${{ vars.ECR_REGISTRY }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      IMAGE_PREFIX: ${{ vars.IMAGE_PREFIX || 'myapp' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login en ECR
+        run: aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+
+      - name: Construir y publicar lo que falte (con SBOM y procedencia)
+        run: scripts/deploy/ecr-publish.sh "$TAG"
+
+  deploy:
+    name: Desplegar en ${{ needs.resolve.outputs.environment }}
+    needs: [resolve, publish]
+    # publish se omite al promover una etiqueta existente: se despliega igual.
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: ${{ needs.resolve.outputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE_API: ${{ vars.ECS_SERVICE_API }}
+      ECS_SERVICE_WORKER: ${{ vars.ECS_SERVICE_WORKER }}
+      MIGRATE_TASK_FAMILY: ${{ vars.MIGRATE_TASK_FAMILY }}
+      SUBNETS: ${{ vars.SUBNETS }}
+      SECURITY_GROUPS: ${{ vars.SECURITY_GROUPS }}
+      SKIP_MIGRATIONS: ${{ needs.resolve.outputs.skip_migrations }}
+      IMAGE_PREFIX: ${{ vars.IMAGE_PREFIX || 'myapp' }}
+      CONTAINER_API: ${{ vars.CONTAINER_API }}
+      CONTAINER_WORKER: ${{ vars.CONTAINER_WORKER }}
+      CONTAINER_MIGRATE: ${{ vars.CONTAINER_MIGRATE }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Las imágenes existen en ECR
+        run: |
+          for t in api worker migrate; do
+            aws ecr describe-images --repository-name "$IMAGE_PREFIX-$t" --image-ids imageTag="$TAG" >/dev/null \
+              || { echo "::error::no existe $IMAGE_PREFIX-$t:$TAG en ECR"; exit 1; }
+          done
+
+      - name: Migraciones, servicios y estabilidad
+        run: scripts/deploy/ecs-deploy.sh "$TAG"
+
+      - name: Resumen
+        run: echo "### ✔ \`$TAG\` desplegado en **${{ needs.resolve.outputs.environment }}**" >>"$GITHUB_STEP_SUMMARY"

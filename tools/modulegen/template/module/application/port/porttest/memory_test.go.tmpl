@@ -1,0 +1,14 @@
+package porttest_test
+
+import (
+	"testing"
+
+	"myapp.v1.0.0/internal/example/application/port"
+	"myapp.v1.0.0/internal/example/application/port/porttest"
+)
+
+func TestInMemoryExampleRepositoryContract(t *testing.T) {
+	porttest.RunExampleRepositoryContract(t, func(*testing.T) port.ExampleRepository {
+		return porttest.NewInMemoryExampleRepository()
+	})
+}

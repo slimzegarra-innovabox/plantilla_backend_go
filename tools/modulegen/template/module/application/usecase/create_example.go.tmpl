@@ -1,0 +1,37 @@
+package usecase
+
+import (
+	"context"
+	"fmt"
+
+	"myapp.v1.0.0/internal/example/application/dto"
+	"myapp.v1.0.0/internal/example/application/mapper"
+	"myapp.v1.0.0/internal/example/application/model"
+	"myapp.v1.0.0/internal/example/application/port"
+	sharedport "myapp.v1.0.0/internal/shared/application/port"
+	"myapp.v1.0.0/internal/shared/application/result"
+)
+
+// CreateExampleUseCase crea un example.
+type CreateExampleUseCase struct {
+	repo  port.ExampleRepository
+	clock sharedport.Clock
+}
+
+// NewCreateExampleUseCase crea el caso de uso.
+func NewCreateExampleUseCase(repo port.ExampleRepository, clock sharedport.Clock) *CreateExampleUseCase {
+	return &CreateExampleUseCase{repo: repo, clock: clock}
+}
+
+// Execute crea el example. Fallos: EXAMPLE_NAME_INVALID (400), EXAMPLE_NAME_TAKEN (409).
+func (uc *CreateExampleUseCase) Execute(ctx context.Context, cmd dto.CreateExampleCommand) (result.Result[dto.ExampleData], error) {
+	example, err := model.NewExample(cmd.Name, cmd.CreatedBy, uc.clock.Now())
+	if err != nil {
+		return result.FromError[dto.ExampleData](err)
+	}
+	created, err := uc.repo.Create(ctx, example)
+	if err != nil {
+		return result.FromError[dto.ExampleData](fmt.Errorf("crear example: %w", err))
+	}
+	return result.Ok(mapper.ToExampleData(created)), nil
+}

@@ -1,0 +1,78 @@
+# ADOT Collector (AWS Distro for OpenTelemetry) para CloudWatch — ADR 0005.
+#
+# Corre junto a la API y al worker (sidecar en la task de ECS, o servicio en el host)
+# y recibe OTLP/HTTP en :4318. La aplicación solo conoce OTLP: el destino (X-Ray,
+# CloudWatch) se decide aquí, sin tocar el código.
+#
+#   - Trazas  → AWS X-Ray (visibles en CloudWatch → X-Ray traces / Transaction Search).
+#   - Métricas → CloudWatch Metrics en formato EMF, namespace MyApp.
+#
+# Permisos del IAM Role de la task: AWSXrayWriteOnlyAccess (o xray:PutTraceSegments,
+# xray:PutTelemetryRecords) y logs:CreateLogGroup/CreateLogStream/PutLogEvents para EMF.
+# En la task definition: AOT_CONFIG_CONTENT con este archivo, o montarlo y usar --config.
+# Imagen: la que fija production.yml, con la que adot-collector_test.sh prueba esta configuración.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Agrega cloud.*, aws.ecs.* y host.* a cada span y métrica.
+  resource_detection:
+    detectors: [env, ecs, ec2]
+    timeout: 2s
+    override: false
+  batch:
+    timeout: 5s
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+exporters:
+  awsxray:
+    # Atributos que X-Ray indexa como anotaciones (filtrables en la consola).
+    indexed_attributes: [request.id, http.route, messaging.destination.name]
+  awsemf:
+    namespace: MyApp
+    log_group_name: /aws/otel/myapp
+    log_retention: 30
+    # Copia los atributos de recurso a cada punto. Sin esto, service.name no existe como
+    # dimensión, ninguna métrica se crea y las alarmas no reciben datos (lo comprueba
+    # adot-collector_test.sh). Los demás atributos solo van en el log EMF: las métricas
+    # y su coste los deciden las metric_declarations.
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Dimensiones explícitas: evita una serie por cada combinación de atributos (coste).
+    dimension_rollup_option: NoDimensionRollup
+    metric_declarations:
+      - dimensions: [[service.name, http.route, http.request.method, http.response.status_code]]
+        metric_name_selectors: ["^http\\.server\\.request\\.duration$"]
+      - dimensions: [[service.name, messaging.destination.name, outcome]]
+        metric_name_selectors: ["^messaging\\.process\\.duration$"]
+      - dimensions: [[service.name]]
+        metric_name_selectors: ["^outbox\\.(pending|oldest_pending_age|dead)$"]
+      - dimensions: [[service.name, outcome, topic]]
+        metric_name_selectors: ["^outbox\\.publish\\.count$"]
+      - dimensions: [[service.name, db.client.connection.state]]
+        metric_name_selectors: ["^db\\.client\\.connection\\.count$"]
+      - dimensions: [[service.name]]
+        metric_name_selectors: ["^db\\.client\\.connection\\.(max|wait_count|wait_time)$", "^go\\.memory\\.used$", "^go\\.goroutine\\.count$"]
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [awsemf]

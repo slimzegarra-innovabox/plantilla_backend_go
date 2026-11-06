@@ -1,0 +1,135 @@
+package persistence
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+	"myapp.v1.0.0/internal/example/application/model"
+	"myapp.v1.0.0/internal/example/application/port"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+	sharedpersistence "myapp.v1.0.0/internal/shared/infrastructure/persistence"
+)
+
+// constraintUniqueName es el índice único de la migración del módulo.
+const constraintUniqueName = "uq_examples_name"
+
+// ExampleRepositoryAdapter implementa port.ExampleRepository.
+type ExampleRepositoryAdapter struct {
+	db *gorm.DB
+}
+
+var _ port.ExampleRepository = (*ExampleRepositoryAdapter)(nil)
+
+// NewExampleRepositoryAdapter crea el adapter.
+func NewExampleRepositoryAdapter(db *gorm.DB) *ExampleRepositoryAdapter {
+	return &ExampleRepositoryAdapter{db: db}
+}
+
+// Create implementa port.ExampleRepository.
+func (a *ExampleRepositoryAdapter) Create(ctx context.Context, e *model.Example) (*model.Example, error) {
+	en := toExampleEntity(e)
+	if err := sharedpersistence.DB(ctx, a.db).Create(&en).Error; err != nil {
+		if sharedpersistence.IsUniqueViolation(err, constraintUniqueName) {
+			return nil, apperr.ErrExampleNameTaken
+		}
+		return nil, fmt.Errorf("insertar example: %w", err)
+	}
+	return toExampleModel(en)
+}
+
+// FindByUUID implementa port.ExampleRepository.
+func (a *ExampleRepositoryAdapter) FindByUUID(ctx context.Context, id uuid.UUID) (*model.Example, bool, error) {
+	var en ExampleEntity
+	err := sharedpersistence.DB(ctx, a.db).Where("uuid = ?", id).Take(&en).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("buscar example: %w", err)
+	}
+	e, err := toExampleModel(en)
+	if err != nil {
+		return nil, false, err
+	}
+	return e, true, nil
+}
+
+// List implementa port.ExampleRepository.
+func (a *ExampleRepositoryAdapter) List(ctx context.Context, q shareddto.PageQuery) (shareddto.PageResult[*model.Example], error) {
+	total, err := sharedpersistence.CountUpTo(sharedpersistence.DB(ctx, a.db).Model(&ExampleEntity{}), shareddto.MaxCount)
+	if err != nil {
+		return shareddto.PageResult[*model.Example]{}, fmt.Errorf("contar examples: %w", err)
+	}
+	var rows []ExampleEntity
+	err = sharedpersistence.DB(ctx, a.db).
+		Order("created_at DESC, id DESC"). // orden explícito y estable (§9.3)
+		Offset(q.Offset()).Limit(q.Limit()).Find(&rows).Error
+	if err != nil {
+		return shareddto.PageResult[*model.Example]{}, fmt.Errorf("listar examples: %w", err)
+	}
+	items := make([]*model.Example, 0, len(rows))
+	for _, en := range rows {
+		e, err := toExampleModel(en)
+		if err != nil {
+			return shareddto.PageResult[*model.Example]{}, err
+		}
+		items = append(items, e)
+	}
+	return shareddto.NewPageResult(q, items, total), nil
+}
+
+// Update implementa port.ExampleRepository (concurrencia optimista).
+func (a *ExampleRepositoryAdapter) Update(ctx context.Context, e *model.Example) (*model.Example, error) {
+	var en ExampleEntity
+	res := sharedpersistence.DB(ctx, a.db).
+		Model(&en).
+		Clauses(clause.Returning{}).
+		Where("uuid = ? AND version = ?", e.UUID(), e.Version()).
+		Updates(map[string]any{
+			"name":       e.Name(),
+			"updated_at": e.UpdatedAt().UTC(),
+			"version":    gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		if sharedpersistence.IsUniqueViolation(res.Error, constraintUniqueName) {
+			return nil, apperr.ErrExampleNameTaken
+		}
+		return nil, fmt.Errorf("actualizar example: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return nil, a.whyNotWritten(ctx, e.UUID())
+	}
+	return toExampleModel(en)
+}
+
+// Delete implementa port.ExampleRepository: borra solo si la versión no cambió.
+func (a *ExampleRepositoryAdapter) Delete(ctx context.Context, e *model.Example) error {
+	res := sharedpersistence.DB(ctx, a.db).
+		Where("uuid = ? AND version = ?", e.UUID(), e.Version()).
+		Delete(&ExampleEntity{})
+	if res.Error != nil {
+		return fmt.Errorf("eliminar example: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return a.whyNotWritten(ctx, e.UUID())
+	}
+	return nil
+}
+
+// whyNotWritten distingue «no existe» de «versión desfasada».
+func (a *ExampleRepositoryAdapter) whyNotWritten(ctx context.Context, id uuid.UUID) error {
+	var count int64
+	if err := sharedpersistence.DB(ctx, a.db).Model(&ExampleEntity{}).Where("uuid = ?", id).Count(&count).Error; err != nil {
+		return fmt.Errorf("verificar example: %w", err)
+	}
+	if count == 0 {
+		return apperr.ErrExampleNotFound
+	}
+	return apperr.ErrExampleVersionConflict
+}

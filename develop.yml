@@ -1,0 +1,151 @@
+# Desarrollo local: API con hot reload (Air) + PostgreSQL + Redis + herramientas.
+#
+#   cp .env.template .env
+#   docker compose -f develop.yml up --build
+#   docker compose -f develop.yml run --rm app_migrate        # aplica migraciones
+#
+# Todos los puertos se publican SOLO en 127.0.0.1: nada queda expuesto en la red local.
+# Las imágenes están fijadas por versión y digest (ver Dockerfile para actualizarlas).
+
+name: myapp-dev
+
+x-backend: &backend
+  # Una sola imagen para backend, migrate y worker: no se desincronizan entre sí.
+  image: myapp-dev:local
+  build:
+    context: .
+    target: dev
+  # Con el usuario del host: lo que se genera en el código montado le pertenece.
+  # `make up` exporta UID/GID; sin make, se asume 1000:1000.
+  user: "${UID:-1000}:${GID:-1000}"
+  env_file:
+    - .env
+  environment: &backend-env
+    AWS_CONFIG_FILE: /aws/config
+    AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+  volumes:
+    - .:/app
+    - go_cache:/cache
+    - ~/.aws:/aws:ro                  # solo en desarrollo: perfil AWS del host
+  depends_on:
+    app_postgres:
+      condition: service_healthy
+
+services:
+  app_backend:
+    <<: *backend
+    container_name: app_backend
+    environment:
+      <<: *backend-env
+      APP_ENV: develop
+      DB_HOST: app_postgres
+      REDIS_ENABLED: "true"           # el stack de develop siempre trae Redis
+      REDIS_ADDR: app_redis:6379
+      # Trazas a Jaeger (http://localhost:16686). Jaeger no recibe métricas.
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://app_jaeger:4318
+      OTEL_METRICS_EXPORTER: none
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      app_postgres:
+        condition: service_healthy
+      app_redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Migraciones: docker compose -f develop.yml run --rm app_migrate [up|down 1|version]
+  app_migrate:
+    <<: *backend
+    container_name: app_migrate
+    profiles: ["migrate"]
+    environment:
+      <<: *backend-env
+      APP_ENV: develop
+      DB_HOST: app_postgres
+    entrypoint: ["go", "run", "./cmd/migrate"]
+    command: ["up"]
+
+  # Worker: tareas de Asynq (y de SQS si SQS_ENABLED=true en .env).
+  app_worker:
+    <<: *backend
+    container_name: app_worker
+    environment:
+      <<: *backend-env
+      APP_ENV: develop
+      DB_HOST: app_postgres
+      REDIS_ENABLED: "true"           # el stack de develop siempre trae Redis
+      REDIS_ADDR: app_redis:6379
+      # Trazas a Jaeger (http://localhost:16686). Jaeger no recibe métricas.
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://app_jaeger:4318
+      OTEL_METRICS_EXPORTER: none
+    command: ["go", "run", "./cmd/worker"]
+    depends_on:
+      app_postgres:
+        condition: service_healthy
+      app_redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  app_postgres:
+    container_name: app_postgres
+    image: postgres:16.15-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app_redis:
+    container_name: app_redis
+    image: redis:7.4.12-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Trazas en local: UI en http://localhost:16686. Recibe OTLP en la red de compose.
+  app_jaeger:
+    container_name: app_jaeger
+    image: jaegertracing/jaeger:2.22.0@sha256:836b967b5abcf1f7758066aa6b348619267a2f1459f72d472840570f9bd88a17
+    ports:
+      - "127.0.0.1:16686:16686"
+    restart: unless-stopped
+
+  app_redisinsight:
+    container_name: app_redisinsight
+    image: redis/redisinsight:2.70@sha256:b7aa18e73329ebb2e3d9e949b8d35193bf5415ef35c16fd9a50e6f832922b296
+    ports:
+      - "127.0.0.1:5540:5540"
+    restart: unless-stopped
+
+  app_asynqmon:
+    container_name: app_asynqmon
+    image: hibiken/asynqmon:0.7.2@sha256:ac80bcffd2f9da20d15a8512fc96287e91e13558ad8718df367f0a0e0d0eda81
+    command: ["--redis-addr=app_redis:6379"]
+    depends_on:
+      app_redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  go_cache:

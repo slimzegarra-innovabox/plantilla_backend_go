@@ -1,0 +1,450 @@
+openapi: 3.0.3
+# Contrato HTTP de la API (CLAUDE.md §9). Se escribe a mano: es el contrato que consume
+# el frontend y se revisa en cada PR como cualquier otro código.
+#
+# cmd/api/openapi_test.go comprueba en `make test` que:
+#   - el documento es OpenAPI válido (incluidas todas las $ref);
+#   - cada ruta registrada en Gin bajo /api/v1 está documentada aquí, y viceversa.
+#
+# Los bloques «>>> module:<nombre>» / «<<< module:<nombre>» los usa `make module`
+# para copiar el módulo example con otro nombre. Los marcadores «@generator:*» indican
+# dónde inserta los bloques nuevos: no los borres. Dentro de un bloque de módulo no se usa
+# la clave `example:` de OpenAPI: el generador traduce la palabra «example» (ponga el
+# ejemplo en la descripción).
+info:
+  title: MyApp API
+  version: 1.0.0
+  description: |
+    Todas las respuestas JSON usan el mismo sobre: `data`, `page` (solo en listados),
+    `notifications` y `request_id` (igual a la cabecera `X-Request-ID`).
+
+    Los errores llevan `data: null` y al menos una notificación. El `code` es estable
+    y es el que debe interpretar el cliente; el `message` puede cambiar.
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  # >>> module:example
+  - name: examples
+    description: Módulo de referencia de la plantilla.
+  # <<< module:example
+  # @generator:tags
+
+paths:
+  # >>> module:example
+  /examples:
+    get:
+      tags: [examples]
+      operationId: listExamples
+      summary: Lista los examples (scope example:read)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ExampleStatus'
+        - name: q
+          in: query
+          required: false
+          description: |
+            Busca en el nombre (contiene, sin distinguir mayúsculas; % y _ son literales).
+            Mínimo 3 caracteres sin contar los espacios de los extremos: con menos, el índice
+            de trigramas no sirve.
+          schema: { type: string, minLength: 3, maxLength: 100 }
+        - name: sort
+          in: query
+          required: false
+          description: |
+            Campos separados por coma, `-` delante para descendente (máximo 3), p. ej. `name,-createdAt`.
+            Permitidos: `name`, `createdAt`, `updatedAt`. Por defecto `-createdAt`.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Página de examples, ordenada por creación descendente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExamplePageEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+    post:
+      tags: [examples]
+      operationId: createExample
+      summary: Crea un example (scope example:write)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExampleRequest'
+      responses:
+        '201':
+          description: Creado.
+          headers:
+            Location:
+              description: /api/v1/examples/{uuid}
+              schema: { type: string }
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: '`EXAMPLE_NAME_TAKEN`, o `IDEMPOTENCY_IN_PROGRESS` (con `Retry-After`) si otra petición con la misma clave sigue en curso.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422':
+          description: '`IDEMPOTENCY_KEY_REUSED`: la clave ya se usó con otros datos.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+
+  /examples/{uuid}:
+    parameters:
+      - $ref: '#/components/parameters/UUIDPath'
+    get:
+      tags: [examples]
+      operationId: getExample
+      summary: Obtiene un example (scope example:read)
+      responses:
+        '200':
+          description: El example.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+    put:
+      tags: [examples]
+      operationId: updateExample
+      summary: Renombra un example con concurrencia optimista (scope example:write)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateExampleRequest'
+      responses:
+        '200':
+          description: El example actualizado, con la versión nueva.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`EXAMPLE_VERSION_CONFLICT` (la versión cambió) o `EXAMPLE_NAME_TAKEN`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+    delete:
+      tags: [examples]
+      operationId: deleteExample
+      summary: Elimina un example que no está activo (scope example:write)
+      responses:
+        '204':
+          description: Eliminado (sin cuerpo).
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`EXAMPLE_VERSION_CONFLICT`: otro usuario lo modificó mientras se eliminaba'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '422':
+          description: '`EXAMPLE_DELETE_ACTIVE`: un example activo se desactiva antes de eliminarlo'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+
+  /examples/{uuid}/activate:
+    parameters:
+      - $ref: '#/components/parameters/UUIDPath'
+    post:
+      tags: [examples]
+      operationId: activateExample
+      summary: Activa un example (scope example:write)
+      responses:
+        '200':
+          description: El example activo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+
+  /examples/{uuid}/deactivate:
+    parameters:
+      - $ref: '#/components/parameters/UUIDPath'
+    post:
+      tags: [examples]
+      operationId: deactivateExample
+      summary: Desactiva un example (scope example:write)
+      responses:
+        '200':
+          description: El example inactivo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+  # <<< module:example
+  # @generator:paths
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Token HS256 emitido por el servicio de identidad. `sub` = uuid del usuario;
+        `scope` = scopes separados por espacios (p. ej. `orders:read orders:write`).
+
+  headers:
+    IdempotencyReplayed:
+      description: '`true` si la respuesta es la repetición de la original (no se ejecutó nada).'
+      schema: { type: string }
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Hace seguro reintentar: con la misma clave y el mismo cuerpo, durante 24 h, se
+        repite la respuesta original sin ejecutar nada. Un uuid nuevo por operación lógica.
+      schema: { type: string, minLength: 1, maxLength: 255, pattern: '^[A-Za-z0-9._:-]+$' }
+    UUIDPath:
+      name: uuid
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Página desde 1. Un valor menor que 1 se toma como 1.
+      schema: { type: integer, minimum: 1, default: 1 }
+    Size:
+      name: size
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    BadRequest:
+      description: |
+        `VALIDATION`: `INVALID_REQUEST_BODY`, `REQUEST_FIELD_INVALID` (una notificación
+        por campo, con `field`), `INVALID_REQUEST_PARAMETER` o un fallo de negocio del módulo.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: '`AUTH_TOKEN_INVALID`: token ausente, inválido o vencido.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: '`AUTH_FORBIDDEN` (falta un scope requerido) o `<MODULO>_FORBIDDEN` (el recurso es de otro usuario).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: '`NOT_FOUND`: el recurso no existe.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    BusinessRule:
+      description: '`BUSINESS_RULE`: la operación no está permitida en el estado actual.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    PayloadTooLarge:
+      description: '`PAYLOAD_TOO_LARGE`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    TooManyRequests:
+      description: '`TOO_MANY_REQUESTS`'
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    InternalError:
+      description: '`UNEXPECTED_ERROR`. El detalle va al log, correlacionado por `request_id`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ServiceTimeout:
+      description: '`SERVICE_TIMEOUT`: la petición o la base de datos excedieron su plazo. Se puede reintentar.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    Notification:
+      type: object
+      additionalProperties: false
+      required: [category, code, message, severity]
+      properties:
+        category:
+          type: string
+          enum: [VALIDATION, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, BUSINESS_RULE, TECHNICAL]
+        code:
+          type: string
+          description: UPPER_SNAKE_CASE, estable.
+          example: AUTH_TOKEN_INVALID
+        message: { type: string }
+        severity: { type: string, enum: [ERROR, WARNING, INFO] }
+        field:
+          type: string
+          description: Campo del request (snake_case) que originó la notificación.
+
+    PageMeta:
+      type: object
+      additionalProperties: false
+      required: [page, size, total_elements, total_pages]
+      properties:
+        page: { type: integer }
+        size: { type: integer }
+        total_elements:
+          type: integer
+          format: int64
+          description: |
+            Total de resultados, con un tope de 100 100. Contar más allá no sirve, porque no
+            se puede paginar tan lejos: un total en el tope significa «100 100 o más».
+        total_pages: { type: integer }
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, page, notifications, request_id]
+      properties:
+        data: { nullable: true, enum: [null] }
+        page: { nullable: true, enum: [null] }
+        notifications:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/Notification' }
+        request_id: { type: string }
+
+    # >>> module:example
+    ExampleStatus:
+      type: string
+      description: Contrato público del estado (cambiarlo es incompatible).
+      enum: [pending, active, inactive]
+
+    Example:
+      type: object
+      additionalProperties: false
+      required: [uuid, name, status, version, created_by, created_at, updated_at]
+      properties:
+        uuid: { type: string, format: uuid }
+        name: { type: string, minLength: 2, maxLength: 150 }
+        status: { $ref: '#/components/schemas/ExampleStatus' }
+        version:
+          type: integer
+          minimum: 1
+          description: Se envía en el PUT; si cambió, la respuesta es 409.
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateExampleRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 150 }
+
+    UpdateExampleRequest:
+      type: object
+      additionalProperties: false
+      required: [name, version]
+      properties:
+        name: { type: string, maxLength: 150 }
+        version: { type: integer, minimum: 1 }
+
+    ExampleEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, page, notifications, request_id]
+      properties:
+        data: { $ref: '#/components/schemas/Example' }
+        page: { nullable: true, enum: [null] }
+        notifications:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        request_id: { type: string }
+
+    ExamplePageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, page, notifications, request_id]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Example' }
+        page: { $ref: '#/components/schemas/PageMeta' }
+        notifications:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        request_id: { type: string }
+    # <<< module:example
+    # @generator:schemas

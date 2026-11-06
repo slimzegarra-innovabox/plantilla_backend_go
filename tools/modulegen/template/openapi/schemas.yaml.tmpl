@@ -1,0 +1,55 @@
+    Example:
+      type: object
+      additionalProperties: false
+      required: [uuid, name, version, created_by, created_at, updated_at]
+      properties:
+        uuid: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 150 }
+        version:
+          type: integer
+          minimum: 1
+          description: Se envía en el PUT; si cambió, la respuesta es 409.
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateExampleRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 150 }
+
+    UpdateExampleRequest:
+      type: object
+      additionalProperties: false
+      required: [name, version]
+      properties:
+        name: { type: string, maxLength: 150 }
+        version: { type: integer, minimum: 1 }
+
+    ExampleEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, page, notifications, request_id]
+      properties:
+        data: { $ref: '#/components/schemas/Example' }
+        page: { nullable: true, enum: [null] }
+        notifications:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        request_id: { type: string }
+
+    ExamplePageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, page, notifications, request_id]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Example' }
+        page: { $ref: '#/components/schemas/PageMeta' }
+        notifications:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        request_id: { type: string }

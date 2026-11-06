@@ -1,0 +1,172 @@
+package usecase_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+	"myapp.v1.0.0/internal/example/application/dto"
+	"myapp.v1.0.0/internal/example/application/model"
+	"myapp.v1.0.0/internal/example/application/port/porttest"
+	"myapp.v1.0.0/internal/example/application/usecase"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+	"myapp.v1.0.0/internal/shared/application/result"
+)
+
+var (
+	t0      = time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	ctx     = context.Background()
+	errBoom = errors.New("connection refused")
+)
+
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+
+// seed guarda un example; su dueño es e.CreatedBy().
+func seed(t *testing.T, repo *porttest.InMemoryExampleRepository, name string) *model.Example {
+	t.Helper()
+	e, err := model.NewExample(name, uuid.New(), t0)
+	require.NoError(t, err)
+	created, err := repo.Create(ctx, e)
+	require.NoError(t, err)
+	return created
+}
+
+func owner(e *model.Example) dto.ExampleActor { return dto.ExampleActor{UserUUID: e.CreatedBy()} }
+
+func assertFailure[T any](t *testing.T, res result.Result[T], err error, want *result.Failure) {
+	t.Helper()
+	require.NoError(t, err, "un fallo de negocio no es un error técnico")
+	require.False(t, res.IsSuccess())
+	assert.Equal(t, want.Notification(), res.Notifications()[0])
+}
+
+func TestCreateExample(t *testing.T) {
+	repo := porttest.NewInMemoryExampleRepository()
+	uc := usecase.NewCreateExampleUseCase(repo, fixedClock{t0})
+	by := uuid.New()
+
+	res, err := uc.Execute(ctx, dto.CreateExampleCommand{Name: " Demo ", CreatedBy: by})
+	require.NoError(t, err)
+	assert.Equal(t, "Demo", res.Data().Name)
+	assert.Equal(t, by, res.Data().CreatedBy)
+
+	res, err = uc.Execute(ctx, dto.CreateExampleCommand{Name: "", CreatedBy: by})
+	assertFailure(t, res, err, apperr.ErrExampleNameInvalid)
+
+	res, err = uc.Execute(ctx, dto.CreateExampleCommand{Name: "demo", CreatedBy: by})
+	assertFailure(t, res, err, apperr.ErrExampleNameTaken)
+}
+
+func TestGetExample(t *testing.T) {
+	repo := porttest.NewInMemoryExampleRepository()
+	e := seed(t, repo, "Demo")
+	uc := usecase.NewGetExampleUseCase(repo)
+
+	res, err := uc.Execute(ctx, dto.GetExampleQuery{UUID: e.UUID()})
+	require.NoError(t, err)
+	assert.Equal(t, "Demo", res.Data().Name)
+
+	res, err = uc.Execute(ctx, dto.GetExampleQuery{UUID: uuid.New()})
+	assertFailure(t, res, err, apperr.ErrExampleNotFound)
+}
+
+func TestListExamples(t *testing.T) {
+	repo := porttest.NewInMemoryExampleRepository()
+	seed(t, repo, "Demo")
+
+	res, err := usecase.NewListExamplesUseCase(repo).Execute(ctx, dto.ListExamplesQuery{Page: shareddto.NewPageQuery(1, 10)})
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, res.Data().TotalElements)
+}
+
+func TestUpdateExample(t *testing.T) {
+	repo := porttest.NewInMemoryExampleRepository()
+	e := seed(t, repo, "Demo")
+	other := seed(t, repo, "Otro")
+	uc := usecase.NewUpdateExampleUseCase(repo, fixedClock{t0.Add(time.Hour)})
+
+	res, err := uc.Execute(ctx, dto.UpdateExampleCommand{Actor: owner(e), UUID: e.UUID(), Name: "Nuevo", Version: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Data().Version)
+
+	for name, tt := range map[string]struct {
+		cmd  dto.UpdateExampleCommand
+		want *result.Failure
+	}{
+		"versión vieja":   {dto.UpdateExampleCommand{Actor: owner(e), UUID: e.UUID(), Name: "X y", Version: 1}, apperr.ErrExampleVersionConflict},
+		"no existe":       {dto.UpdateExampleCommand{Actor: owner(e), UUID: uuid.New(), Name: "X y", Version: 1}, apperr.ErrExampleNotFound},
+		"nombre inválido": {dto.UpdateExampleCommand{Actor: owner(e), UUID: e.UUID(), Name: "", Version: 2}, apperr.ErrExampleNameInvalid},
+		"nombre ocupado":  {dto.UpdateExampleCommand{Actor: owner(e), UUID: e.UUID(), Name: other.Name(), Version: 2}, apperr.ErrExampleNameTaken},
+		"de otro usuario": {dto.UpdateExampleCommand{Actor: dto.ExampleActor{UserUUID: uuid.New()}, UUID: e.UUID(), Name: "X y", Version: 2}, apperr.ErrExampleForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := uc.Execute(ctx, tt.cmd)
+			assertFailure(t, res, err, tt.want)
+		})
+	}
+
+	res, err = uc.Execute(ctx, dto.UpdateExampleCommand{Actor: dto.ExampleActor{UserUUID: uuid.New(), IsAdmin: true}, UUID: e.UUID(), Name: "Admin", Version: 2})
+	require.NoError(t, err)
+	assert.True(t, res.IsSuccess(), "un administrador sí")
+}
+
+func TestDeleteExample(t *testing.T) {
+	repo := porttest.NewInMemoryExampleRepository()
+	e := seed(t, repo, "Demo")
+	uc := usecase.NewDeleteExampleUseCase(repo)
+
+	res, err := uc.Execute(ctx, dto.DeleteExampleCommand{Actor: dto.ExampleActor{UserUUID: uuid.New()}, UUID: e.UUID()})
+	assertFailure(t, res, err, apperr.ErrExampleForbidden)
+	assert.Zero(t, repo.Calls["Delete"], "no se escribe nada")
+
+	res, err = uc.Execute(ctx, dto.DeleteExampleCommand{Actor: owner(e), UUID: e.UUID()})
+	require.NoError(t, err)
+	assert.True(t, res.IsSuccess())
+
+	res, err = uc.Execute(ctx, dto.DeleteExampleCommand{Actor: owner(e), UUID: e.UUID()})
+	assertFailure(t, res, err, apperr.ErrExampleNotFound)
+}
+
+func TestTechnicalErrorsPropagate(t *testing.T) {
+	repo := porttest.NewInMemoryExampleRepository()
+	repo.Err = errBoom
+	id := uuid.New()
+	for name, run := range map[string]func() error{
+		"create": func() error {
+			_, err := usecase.NewCreateExampleUseCase(repo, fixedClock{t0}).Execute(ctx, dto.CreateExampleCommand{Name: "Demo", CreatedBy: id})
+			return err
+		},
+		"get": func() error {
+			_, err := usecase.NewGetExampleUseCase(repo).Execute(ctx, dto.GetExampleQuery{UUID: id})
+			return err
+		},
+		"list": func() error {
+			_, err := usecase.NewListExamplesUseCase(repo).Execute(ctx, dto.ListExamplesQuery{Page: shareddto.NewPageQuery(1, 10)})
+			return err
+		},
+		"update": func() error {
+			_, err := usecase.NewUpdateExampleUseCase(repo, fixedClock{t0}).Execute(ctx, dto.UpdateExampleCommand{UUID: id, Name: "Demo", Version: 1})
+			return err
+		},
+		"delete": func() error {
+			_, err := usecase.NewDeleteExampleUseCase(repo).Execute(ctx, dto.DeleteExampleCommand{UUID: id})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := run()
+			require.ErrorIs(t, err, errBoom, "el error técnico se propaga envuelto")
+			_, isFailure := result.AsFailure(err)
+			assert.False(t, isFailure)
+		})
+	}
+}

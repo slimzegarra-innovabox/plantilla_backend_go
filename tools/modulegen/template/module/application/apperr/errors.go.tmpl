@@ -1,0 +1,25 @@
+// Package apperr es el catálogo de fallos de negocio anticipados del módulo.
+//
+// El code es el contrato con el cliente: estable y en UPPER_SNAKE_CASE. Cada fallo
+// tiene al menos una prueba que lo provoca.
+package apperr
+
+import "myapp.v1.0.0/internal/shared/application/result"
+
+var (
+	// ErrExampleNameInvalid: el nombre está vacío o supera los 150 caracteres.
+	ErrExampleNameInvalid = result.NewFailure(result.Validation,
+		"EXAMPLE_NAME_INVALID", "El nombre es obligatorio y admite como máximo 150 caracteres.")
+	// ErrExampleNotFound: no existe un example con ese uuid.
+	ErrExampleNotFound = result.NewFailure(result.NotFound,
+		"EXAMPLE_NOT_FOUND", "El ejemplo no existe.")
+	// ErrExampleForbidden: el example es de otro usuario y quien actúa no es administrador.
+	ErrExampleForbidden = result.NewFailure(result.Forbidden,
+		"EXAMPLE_FORBIDDEN", "Solo quien creó el ejemplo o un administrador puede modificarlo.")
+	// ErrExampleNameTaken: ya existe un example con ese nombre (sin distinguir mayúsculas).
+	ErrExampleNameTaken = result.NewFailure(result.Conflict,
+		"EXAMPLE_NAME_TAKEN", "Ya existe un ejemplo con ese nombre.")
+	// ErrExampleVersionConflict: otro usuario lo modificó desde que se leyó.
+	ErrExampleVersionConflict = result.NewFailure(result.Conflict,
+		"EXAMPLE_VERSION_CONFLICT", "El ejemplo fue modificado por otro usuario. Recargue e intente nuevamente.")
+)

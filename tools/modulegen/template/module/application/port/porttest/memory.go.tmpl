@@ -1,0 +1,148 @@
+// Package porttest contiene el doble en memoria de los puertos del módulo y la suite de
+// contrato que cumple junto con el adapter real. Solo biblioteca estándar.
+package porttest
+
+import (
+	"cmp"
+	"context"
+	"slices"
+	"strings"
+	"sync"
+
+	"github.com/google/uuid"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+	"myapp.v1.0.0/internal/example/application/model"
+	"myapp.v1.0.0/internal/example/application/port"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+)
+
+// InMemoryExampleRepository tiene la misma semántica que el adapter real. Err, si no es
+// nil, hace fallar todo método (fallo técnico). Calls cuenta las llamadas.
+type InMemoryExampleRepository struct {
+	mu     sync.Mutex
+	rows   map[uuid.UUID]*model.Example
+	nextID int64
+	Err    error
+	Calls  map[string]int
+}
+
+var _ port.ExampleRepository = (*InMemoryExampleRepository)(nil)
+
+// NewInMemoryExampleRepository crea el doble.
+func NewInMemoryExampleRepository() *InMemoryExampleRepository {
+	return &InMemoryExampleRepository{rows: map[uuid.UUID]*model.Example{}, Calls: map[string]int{}}
+}
+
+func (r *InMemoryExampleRepository) nameTaken(name string, except uuid.UUID) bool {
+	for id, e := range r.rows {
+		if id != except && strings.EqualFold(e.Name(), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// Create implementa port.ExampleRepository.
+func (r *InMemoryExampleRepository) Create(_ context.Context, e *model.Example) (*model.Example, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Calls["Create"]++
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	if r.nameTaken(e.Name(), uuid.Nil) {
+		return nil, apperr.ErrExampleNameTaken
+	}
+	r.nextID++
+	stored := model.RestoreExample(r.nextID, e.UUID(), e.Name(), e.Version(), e.CreatedBy(), e.CreatedAt(), e.UpdatedAt())
+	r.rows[e.UUID()] = stored
+	return clone(stored), nil
+}
+
+// FindByUUID implementa port.ExampleRepository.
+func (r *InMemoryExampleRepository) FindByUUID(_ context.Context, id uuid.UUID) (*model.Example, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Calls["FindByUUID"]++
+	if r.Err != nil {
+		return nil, false, r.Err
+	}
+	e, ok := r.rows[id]
+	if !ok {
+		return nil, false, nil
+	}
+	return clone(e), true, nil
+}
+
+// List implementa port.ExampleRepository.
+func (r *InMemoryExampleRepository) List(_ context.Context, q shareddto.PageQuery) (shareddto.PageResult[*model.Example], error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Calls["List"]++
+	if r.Err != nil {
+		return shareddto.PageResult[*model.Example]{}, r.Err
+	}
+	all := make([]*model.Example, 0, len(r.rows))
+	for _, e := range r.rows {
+		all = append(all, e)
+	}
+	slices.SortFunc(all, func(a, b *model.Example) int {
+		if c := b.CreatedAt().Compare(a.CreatedAt()); c != 0 {
+			return c
+		}
+		return cmp.Compare(b.ID(), a.ID())
+	})
+	from := min(q.Offset(), len(all))
+	to := min(from+q.Limit(), len(all))
+	items := make([]*model.Example, 0, to-from)
+	for _, e := range all[from:to] {
+		items = append(items, clone(e))
+	}
+	return shareddto.NewPageResult(q, items, min(int64(len(all)), shareddto.MaxCount)), nil
+}
+
+// Update implementa port.ExampleRepository.
+func (r *InMemoryExampleRepository) Update(_ context.Context, e *model.Example) (*model.Example, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Calls["Update"]++
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	current, ok := r.rows[e.UUID()]
+	switch {
+	case !ok:
+		return nil, apperr.ErrExampleNotFound
+	case current.Version() != e.Version():
+		return nil, apperr.ErrExampleVersionConflict
+	case r.nameTaken(e.Name(), e.UUID()):
+		return nil, apperr.ErrExampleNameTaken
+	}
+	stored := model.RestoreExample(current.ID(), e.UUID(), e.Name(), e.Version()+1, e.CreatedBy(), e.CreatedAt(), e.UpdatedAt())
+	r.rows[e.UUID()] = stored
+	return clone(stored), nil
+}
+
+// Delete implementa port.ExampleRepository.
+func (r *InMemoryExampleRepository) Delete(_ context.Context, e *model.Example) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Calls["Delete"]++
+	if r.Err != nil {
+		return r.Err
+	}
+	current, ok := r.rows[e.UUID()]
+	switch {
+	case !ok:
+		return apperr.ErrExampleNotFound
+	case current.Version() != e.Version():
+		return apperr.ErrExampleVersionConflict
+	}
+	delete(r.rows, e.UUID())
+	return nil
+}
+
+func clone(e *model.Example) *model.Example {
+	return model.RestoreExample(e.ID(), e.UUID(), e.Name(), e.Version(), e.CreatedBy(), e.CreatedAt(), e.UpdatedAt())
+}

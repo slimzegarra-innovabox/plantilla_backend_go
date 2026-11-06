@@ -1,0 +1,124 @@
+package porttest
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+	"myapp.v1.0.0/internal/example/application/model"
+	"myapp.v1.0.0/internal/example/application/port"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+)
+
+// RunExampleRepositoryContract comprueba la semántica que cumplen el doble y el adapter.
+func RunExampleRepositoryContract(t *testing.T, newRepo func(t *testing.T) port.ExampleRepository) {
+	t.Helper()
+	ctx := context.Background()
+	base := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	create := func(t *testing.T, repo port.ExampleRepository, name string, at time.Time) *model.Example {
+		t.Helper()
+		e, err := model.NewExample(name, uuid.New(), at)
+		must(t, err)
+		created, err := repo.Create(ctx, e)
+		must(t, err)
+		return created
+	}
+
+	t.Run("Create y FindByUUID conservan los campos", func(t *testing.T) {
+		repo := newRepo(t)
+		created := create(t, repo, "Demo", base)
+		got, found, err := repo.FindByUUID(ctx, created.UUID())
+		must(t, err)
+		if !found || got.Name() != "Demo" || got.Version() != 1 || got.ID() == 0 || !got.CreatedAt().Equal(base) {
+			t.Fatalf("FindByUUID: found=%v %+v", found, got)
+		}
+	})
+
+	t.Run("un uuid inexistente devuelve found=false sin error", func(t *testing.T) {
+		_, found, err := newRepo(t).FindByUUID(ctx, uuid.New())
+		must(t, err)
+		if found {
+			t.Fatal("se esperaba found=false")
+		}
+	})
+
+	t.Run("un nombre repetido sin distinguir mayúsculas es ErrExampleNameTaken", func(t *testing.T) {
+		repo := newRepo(t)
+		create(t, repo, "Demo", base)
+		e, err := model.NewExample("DEMO", uuid.New(), base)
+		must(t, err)
+		if _, err := repo.Create(ctx, e); !errors.Is(err, apperr.ErrExampleNameTaken) {
+			t.Fatalf("Create: %v", err)
+		}
+	})
+
+	t.Run("Update incrementa la versión; con una vieja es conflicto", func(t *testing.T) {
+		repo := newRepo(t)
+		created := create(t, repo, "Demo", base)
+		stale, _, err := repo.FindByUUID(ctx, created.UUID())
+		must(t, err)
+		must(t, created.Rename("Nuevo", base.Add(time.Minute)))
+		updated, err := repo.Update(ctx, created)
+		must(t, err)
+		if updated.Version() != 2 || updated.Name() != "Nuevo" {
+			t.Fatalf("Update: %+v", updated)
+		}
+		if _, err := repo.Update(ctx, stale); !errors.Is(err, apperr.ErrExampleVersionConflict) {
+			t.Fatalf("Update con versión vieja: %v", err)
+		}
+	})
+
+	t.Run("Update de un inexistente es ErrExampleNotFound", func(t *testing.T) {
+		e, err := model.NewExample("Demo", uuid.New(), base)
+		must(t, err)
+		if _, err := newRepo(t).Update(ctx, e); !errors.Is(err, apperr.ErrExampleNotFound) {
+			t.Fatalf("Update: %v", err)
+		}
+	})
+
+	t.Run("Delete elimina solo con la versión vigente", func(t *testing.T) {
+		repo := newRepo(t)
+		created := create(t, repo, "Demo", base)
+		stale, _, err := repo.FindByUUID(ctx, created.UUID())
+		must(t, err)
+		must(t, created.Rename("Nuevo", base))
+		current, err := repo.Update(ctx, created)
+		must(t, err)
+		if err := repo.Delete(ctx, stale); !errors.Is(err, apperr.ErrExampleVersionConflict) {
+			t.Fatalf("Delete con versión vieja: %v", err)
+		}
+		must(t, repo.Delete(ctx, current))
+		if err := repo.Delete(ctx, current); !errors.Is(err, apperr.ErrExampleNotFound) {
+			t.Fatalf("Delete de un inexistente: %v", err)
+		}
+	})
+
+	t.Run("List ordena por creación descendente y pagina", func(t *testing.T) {
+		repo := newRepo(t)
+		for i := range 3 {
+			create(t, repo, fmt.Sprintf("Item %d", i), base.Add(time.Duration(i)*time.Minute))
+		}
+		page, err := repo.List(ctx, shareddto.NewPageQuery(1, 2))
+		must(t, err)
+		if page.TotalElements != 3 || page.TotalPages != 2 || len(page.Items) != 2 || page.Items[0].Name() != "Item 2" {
+			t.Fatalf("List: %+v", page)
+		}
+		beyond, err := repo.List(ctx, shareddto.NewPageQuery(9, 2))
+		must(t, err)
+		if beyond.Items == nil || len(beyond.Items) != 0 {
+			t.Fatalf("una página fuera de rango es una lista vacía: %v", beyond.Items)
+		}
+	})
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}

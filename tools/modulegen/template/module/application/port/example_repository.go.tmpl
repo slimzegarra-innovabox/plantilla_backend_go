@@ -1,0 +1,34 @@
+// Package port contiene las interfaces que los casos de uso necesitan para hablar con
+// el exterior.
+package port
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	"myapp.v1.0.0/internal/example/application/model"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+)
+
+// ExampleRepository persiste examples. Los métodos de escritura devuelven el estado
+// PERSISTIDO (id, versión nueva).
+type ExampleRepository interface {
+	// Create inserta un example nuevo. Fallos: apperr.ErrExampleNameTaken.
+	Create(ctx context.Context, example *model.Example) (*model.Example, error)
+
+	// FindByUUID busca por uuid. Si no existe devuelve (nil, false, nil).
+	FindByUUID(ctx context.Context, id uuid.UUID) (*model.Example, bool, error)
+
+	// List devuelve una página, de la creación más reciente a la más antigua.
+	List(ctx context.Context, page shareddto.PageQuery) (shareddto.PageResult[*model.Example], error)
+
+	// Update guarda los cambios solo si la versión persistida sigue siendo
+	// example.Version(), e incrementa la versión.
+	// Fallos: apperr.ErrExampleNotFound, ErrExampleVersionConflict, ErrExampleNameTaken.
+	Update(ctx context.Context, example *model.Example) (*model.Example, error)
+
+	// Delete elimina solo si la versión persistida sigue siendo example.Version().
+	// Fallos: apperr.ErrExampleNotFound, ErrExampleVersionConflict.
+	Delete(ctx context.Context, example *model.Example) error
+}

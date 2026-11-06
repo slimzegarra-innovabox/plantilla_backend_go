@@ -1,0 +1,29 @@
+package persistence
+
+import (
+	"fmt"
+
+	"myapp.v1.0.0/internal/example/application/model"
+)
+
+func toExampleEntity(e *model.Example) ExampleEntity {
+	return ExampleEntity{
+		ID: e.ID(), UUID: e.UUID(), Name: e.Name(), Version: e.Version(), CreatedBy: e.CreatedBy(),
+		CreatedAt: e.CreatedAt().UTC(), UpdatedAt: e.UpdatedAt().UTC(),
+	}
+}
+
+// toExampleModel rehidrata el model. Es ESTRICTO: un valor persistido inválido es un
+// error técnico (dato corrupto → 500 en el log), nunca un model con valores vacíos.
+// El error de NormalizeExampleName es un *result.Failure y NO se envuelve: si viajara
+// envuelto, se respondería 400 por un dato corrupto de la base.
+func toExampleModel(en ExampleEntity) (*model.Example, error) {
+	name, err := model.NormalizeExampleName(en.Name)
+	if err != nil || name != en.Name {
+		return nil, fmt.Errorf("examples.id=%d: el nombre persistido no cumple las reglas del model", en.ID)
+	}
+	if en.Version < 1 {
+		return nil, fmt.Errorf("examples.id=%d: versión persistida inválida (%d)", en.ID, en.Version)
+	}
+	return model.RestoreExample(en.ID, en.UUID, name, en.Version, en.CreatedBy, en.CreatedAt.UTC(), en.UpdatedAt.UTC()), nil
+}

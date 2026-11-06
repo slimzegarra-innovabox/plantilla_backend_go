@@ -1,0 +1,30 @@
+# Mantiene al día lo que la plantilla fija a propósito: módulos Go, imágenes
+# Docker (versión + digest) y GitHub Actions. Fijar sin actualizar también es un
+# riesgo: las correcciones de seguridad no llegan solas.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Un solo PR por semana para las dependencias menores y de parche.
+      go-minor-patch:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+
+  # Dockerfile (imagen de Go y distroless) y los compose (postgres, redis, herramientas).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

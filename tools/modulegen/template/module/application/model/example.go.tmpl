@@ -1,0 +1,91 @@
+// Package model contiene los objetos de negocio del módulo.
+package model
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+)
+
+const exampleNameMaxLength = 150
+
+// Example es el objeto de negocio. Sus campos son privados: solo cambia a través de
+// métodos que hacen cumplir sus reglas.
+type Example struct {
+	id        int64 // interno; 0 hasta que se persiste
+	uuid      uuid.UUID
+	name      string
+	version   int
+	createdBy uuid.UUID
+	createdAt time.Time
+	updatedAt time.Time
+}
+
+// NormalizeExampleName recorta espacios y valida el nombre.
+func NormalizeExampleName(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if n := utf8.RuneCountInString(v); n == 0 || n > exampleNameMaxLength {
+		return "", apperr.ErrExampleNameInvalid
+	}
+	return v, nil
+}
+
+// NewExample crea un example nuevo, en versión 1. createdBy proviene del Principal.
+func NewExample(rawName string, createdBy uuid.UUID, now time.Time) (*Example, error) {
+	name, err := NormalizeExampleName(rawName)
+	if err != nil {
+		return nil, err
+	}
+	if createdBy == uuid.Nil {
+		return nil, errors.New("NewExample: createdBy es obligatorio")
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("generar uuid de example: %w", err)
+	}
+	return &Example{uuid: id, name: name, version: 1, createdBy: createdBy, createdAt: now, updatedAt: now}, nil
+}
+
+// RestoreExample rehidrata un example desde persistencia, sin revalidar las reglas de
+// creación. Solo lo usan los mappers de infrastructure/persistence.
+func RestoreExample(id int64, uuid uuid.UUID, name string, version int, createdBy uuid.UUID, createdAt, updatedAt time.Time) *Example {
+	return &Example{id: id, uuid: uuid, name: name, version: version, createdBy: createdBy, createdAt: createdAt, updatedAt: updatedAt}
+}
+
+// Rename cambia el nombre. Fallo: apperr.ErrExampleNameInvalid.
+func (e *Example) Rename(rawName string, now time.Time) error {
+	name, err := NormalizeExampleName(rawName)
+	if err != nil {
+		return err
+	}
+	e.name = name
+	e.updatedAt = now
+	return nil
+}
+
+// CanBeManagedBy indica si un usuario puede modificar este example: quien lo creó o un
+// administrador. El scope de la ruta dice qué puede hacer el usuario, no sobre qué
+// registros. Fallo: apperr.ErrExampleForbidden.
+func (e *Example) CanBeManagedBy(userUUID uuid.UUID, isAdmin bool) error {
+	if isAdmin || e.createdBy == userUUID {
+		return nil
+	}
+	return apperr.ErrExampleForbidden
+}
+
+func (e *Example) ID() int64       { return e.id }
+func (e *Example) UUID() uuid.UUID { return e.uuid }
+func (e *Example) Name() string    { return e.name }
+
+// Version es la versión persistida que se leyó: la escritura solo se aplica si sigue
+// siendo la misma (concurrencia optimista).
+func (e *Example) Version() int         { return e.version }
+func (e *Example) CreatedBy() uuid.UUID { return e.createdBy }
+func (e *Example) CreatedAt() time.Time { return e.createdAt }
+func (e *Example) UpdatedAt() time.Time { return e.updatedAt }

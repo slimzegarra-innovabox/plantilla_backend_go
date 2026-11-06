@@ -1,0 +1,235 @@
+name: CI
+
+# Las acciones se fijan por SHA (con la versión en el comentario), como las imágenes:
+# una etiqueta se puede mover. Dependabot propone las actualizaciones.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Mínimo privilegio: el CI solo lee el repositorio.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+      - name: Lint (golangci-lint v2, incluye depguard)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+
+      - name: Formato (gofmt)
+        run: make fmt-check
+
+      # Workflows (actionlint + shellcheck en los run:), scripts de despliegue y la
+      # prueba del despliegue a ECS con un `aws` falso.
+      - name: Workflows y scripts de despliegue
+        run: make lint-ci
+
+      # El generador debe producir módulos que compilan y pasan sus pruebas y las de
+      # contrato (OpenAPI, arquitectura). Se descartan al terminar el paso.
+      - name: Generador de módulos (make module)
+        run: |
+          go run ./tools/modulegen -name purchase_orders -entity purchase_order -label orden
+          go build ./...
+          go test -count=1 ./cmd/api/ ./internal/purchaseorders/... ./test/architecture/
+          git checkout -- . && git clean -fdq
+
+      - name: Generador de módulos completo (make module FULL=1)
+        # Solo mientras exista el módulo de referencia (make remove-example lo quita).
+        if: hashFiles('internal/example/module.go') != ''
+        run: |
+          go run ./tools/modulegen -name orders -entity order -label pedido -full
+          go build ./...
+          go test -count=1 ./cmd/api/ ./internal/orders/... ./test/architecture/
+          git checkout -- . && git clean -fdq
+
+      # Sin el módulo de referencia, todo debe seguir en verde: es como arranca un proyecto.
+      - name: Quitar el módulo de referencia (make remove-example)
+        if: hashFiles('internal/example/module.go') != ''
+        run: |
+          go run ./tools/modulegen -remove-example
+          go build ./...
+          go test -count=1 ./cmd/api/ ./test/architecture/ ./tools/...
+          go run ./tools/modulegen -name orders -entity order -label pedido
+          go build ./...
+          go test -count=1 ./cmd/api/ ./internal/orders/... ./test/architecture/
+          git checkout -- . && git clean -fdq
+
+      # Falla si el código alcanza una vulnerabilidad conocida (stdlib o dependencias).
+      - name: Vulnerabilities (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  migrations:
+    name: Migraciones inmutables
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (historia completa)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Una migración ya integrada no se edita ni se borra (CLAUDE.md §12.2).
+      - name: Comparar con lo ya integrado
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]]; then
+            echo "Rama nueva: no hay base con la que comparar."; exit 0
+          fi
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::warning::la base $BASE no está en la historia (¿force push?): no se puede verificar"; exit 0
+          fi
+          scripts/ci/check-migrations.sh "$BASE"
+
+  integration:
+    name: Integration (PostgreSQL, Redis)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read   # leer la cobertura de la última ejecución de main
+
+    services:
+      postgres:
+        image: postgres:16.15-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7.4.12-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # pgtest usa esta base en lugar de levantar un contenedor propio.
+      # -p 1: los paquetes comparten la base y la vacían entre pruebas.
+      - name: Run integration tests
+        env:
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/test?sslmode=disable
+          TEST_REDIS_ADDR: localhost:6379
+          E2E_COVERDIR: ${{ github.workspace }}/coverage-e2e
+        run: |
+          mkdir -p coverage-e2e
+          go test -tags integration -race -count=1 -p 1 -covermode=atomic -coverpkg=./cmd/...,./internal/... -coverprofile=coverage.out ./...
+          # Lo que ejecutaron los binarios de test/e2e.
+          go tool covdata textfmt -i=coverage-e2e -o=coverage-e2e.out
+          tail -n +2 coverage-e2e.out >>coverage.out
+
+      # Informativo: sin umbral obligatorio. La tendencia compara con la última de main.
+      - name: Cobertura
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=""
+          last="$(gh run list --workflow ci.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+          if [[ -n "$last" ]] && gh run download "$last" --name coverage --dir previous 2>/dev/null; then
+            previous="$(cat previous/coverage-total.txt)"
+          fi
+          scripts/ci/coverage.sh coverage.out "$previous" coverage-total.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Publicar la cobertura
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: |
+            coverage.html
+            coverage-total.txt
+          retention-days: 90
+
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    needs: [test, integration]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build API
+        run: go build -o /dev/null ./cmd/api
+
+      - name: Build Worker
+        run: go build -o /dev/null ./cmd/worker
+
+      - name: Build Migrate
+        run: go build -o /dev/null ./cmd/migrate
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    needs: [test, integration]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Valida el Dockerfile y que cada target compila. No publica imágenes.
+      - name: Build api, migrate y worker
+        run: |
+          for t in api migrate worker; do
+            docker build --target "$t" --build-arg VERSION="${GITHUB_SHA::7}" -t "myapp-$t:ci" .
+          done
+
+      - name: La imagen de la API corre sin root y su healthcheck existe
+        run: |
+          test "$(docker image inspect myapp-api:ci --format '{{.Config.User}}')" = "nonroot:nonroot"
+          docker image inspect myapp-api:ci --format '{{.Config.Healthcheck.Test}}' | grep -q healthcheck
+
+      # Trivy fijado por digest (ver Makefile): falla ante HIGH/CRITICAL corregibles en el
+      # sistema base o en las dependencias de los binarios, y genera el SBOM de cada imagen.
+      - name: Escaneo de vulnerabilidades y SBOM (Trivy)
+        run: make scan SCAN_TAG=ci SKIP_BUILD=1
+
+      - name: Publicar los SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom/*.cdx.json
+          retention-days: 90

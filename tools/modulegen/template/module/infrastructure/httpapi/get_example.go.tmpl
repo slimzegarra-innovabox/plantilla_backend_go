@@ -1,0 +1,23 @@
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"myapp.v1.0.0/internal/example/application/dto"
+	sharedhttp "myapp.v1.0.0/internal/shared/infrastructure/httpapi"
+)
+
+// Get atiende GET /api/v1/examples/{uuid}.
+func (h *ExampleHandler) Get(c *gin.Context) {
+	id, ok := sharedhttp.UUIDParam(c, "uuid")
+	if !ok {
+		return
+	}
+	res, err := h.get.Execute(c.Request.Context(), dto.GetExampleQuery{UUID: id})
+	if !sharedhttp.Handle(c, res, err) {
+		return
+	}
+	sharedhttp.WriteData(c, http.StatusOK, toExampleResponse(res.Data()), res.Notifications())
+}

@@ -1,0 +1,23 @@
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"myapp.v1.0.0/internal/example/application/dto"
+	sharedhttp "myapp.v1.0.0/internal/shared/infrastructure/httpapi"
+)
+
+// Delete atiende DELETE /api/v1/examples/{uuid}: 204 sin cuerpo.
+func (h *ExampleHandler) Delete(c *gin.Context) {
+	id, ok := sharedhttp.UUIDParam(c, "uuid")
+	if !ok {
+		return
+	}
+	res, err := h.remove.Execute(c.Request.Context(), dto.DeleteExampleCommand{Actor: actor(c), UUID: id})
+	if !sharedhttp.Handle(c, res, err) {
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

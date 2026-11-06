@@ -1,0 +1,31 @@
+package usecase
+
+import (
+	"context"
+	"fmt"
+
+	"myapp.v1.0.0/internal/example/application/dto"
+	"myapp.v1.0.0/internal/example/application/mapper"
+	"myapp.v1.0.0/internal/example/application/port"
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+	"myapp.v1.0.0/internal/shared/application/result"
+)
+
+// ListExamplesUseCase lista examples, paginados.
+type ListExamplesUseCase struct {
+	repo port.ExampleRepository
+}
+
+// NewListExamplesUseCase crea el caso de uso.
+func NewListExamplesUseCase(repo port.ExampleRepository) *ListExamplesUseCase {
+	return &ListExamplesUseCase{repo: repo}
+}
+
+// Execute devuelve la página pedida.
+func (uc *ListExamplesUseCase) Execute(ctx context.Context, q dto.ListExamplesQuery) (result.Result[shareddto.PageResult[dto.ExampleData]], error) {
+	page, err := uc.repo.List(ctx, q.Page)
+	if err != nil {
+		return result.FromError[shareddto.PageResult[dto.ExampleData]](fmt.Errorf("listar examples: %w", err))
+	}
+	return result.Ok(shareddto.MapPage(page, mapper.ToExampleData)), nil
+}

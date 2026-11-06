@@ -1,0 +1,134 @@
+  /examples:
+    get:
+      tags: [examples]
+      operationId: listExamples
+      summary: Lista los examples (scope example:read)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Página de examples, de la creación más reciente a la más antigua.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExamplePageEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+    post:
+      tags: [examples]
+      operationId: createExample
+      summary: Crea un example (scope example:write)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExampleRequest'
+      responses:
+        '201':
+          description: Creado.
+          headers:
+            Location:
+              description: /api/v1/examples/{uuid}
+              schema: { type: string }
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: '`EXAMPLE_NAME_TAKEN`, o `IDEMPOTENCY_IN_PROGRESS` (con `Retry-After`) si otra petición con la misma clave sigue en curso.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422':
+          description: '`IDEMPOTENCY_KEY_REUSED`: la clave ya se usó con otros datos.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+
+  /examples/{uuid}:
+    parameters:
+      - $ref: '#/components/parameters/UUIDPath'
+    get:
+      tags: [examples]
+      operationId: getExample
+      summary: Obtiene un example (scope example:read)
+      responses:
+        '200':
+          description: El example.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+    put:
+      tags: [examples]
+      operationId: updateExample
+      summary: Modifica un example con concurrencia optimista (scope example:write)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateExampleRequest'
+      responses:
+        '200':
+          description: El example actualizado, con la versión nueva.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExampleEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`EXAMPLE_VERSION_CONFLICT` (la versión cambió) o `EXAMPLE_NAME_TAKEN`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }
+    delete:
+      tags: [examples]
+      operationId: deleteExample
+      summary: Elimina un example (scope example:write)
+      responses:
+        '204':
+          description: Eliminado (sin cuerpo).
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`EXAMPLE_VERSION_CONFLICT`: otro usuario lo modificó mientras se eliminaba'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceTimeout' }

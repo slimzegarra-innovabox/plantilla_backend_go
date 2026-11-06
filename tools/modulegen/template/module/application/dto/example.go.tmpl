@@ -1,0 +1,57 @@
+// Package dto contiene las entradas y salidas de los casos de uso. Sin tags ni lógica.
+package dto
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+
+	shareddto "myapp.v1.0.0/internal/shared/application/dto"
+)
+
+// ExampleActor es quien ejecuta una escritura. Lo arma el adaptador de entrada desde el
+// Principal autenticado, nunca desde el cuerpo: application no conoce los scopes.
+type ExampleActor struct {
+	UserUUID uuid.UUID
+	IsAdmin  bool
+}
+
+// CreateExampleCommand crea un example.
+type CreateExampleCommand struct {
+	Name      string
+	CreatedBy uuid.UUID
+}
+
+// UpdateExampleCommand modifica un example, con la versión que leyó el cliente.
+type UpdateExampleCommand struct {
+	Actor   ExampleActor
+	UUID    uuid.UUID
+	Name    string
+	Version int
+}
+
+// DeleteExampleCommand elimina un example.
+type DeleteExampleCommand struct {
+	Actor ExampleActor
+	UUID  uuid.UUID
+}
+
+// GetExampleQuery obtiene un example.
+type GetExampleQuery struct {
+	UUID uuid.UUID
+}
+
+// ListExamplesQuery lista examples.
+type ListExamplesQuery struct {
+	Page shareddto.PageQuery
+}
+
+// ExampleData es la salida de los casos de uso.
+type ExampleData struct {
+	UUID      uuid.UUID
+	Name      string
+	Version   int
+	CreatedBy uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}

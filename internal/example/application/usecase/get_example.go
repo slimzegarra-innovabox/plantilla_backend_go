@@ -1,0 +1,34 @@
+package usecase
+
+import (
+	"context"
+	"fmt"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+	"myapp.v1.0.0/internal/example/application/dto"
+	"myapp.v1.0.0/internal/example/application/mapper"
+	"myapp.v1.0.0/internal/example/application/port"
+	"myapp.v1.0.0/internal/shared/application/result"
+)
+
+// GetExampleUseCase obtiene un example por uuid.
+type GetExampleUseCase struct {
+	repo port.ExampleRepository
+}
+
+// NewGetExampleUseCase crea el caso de uso.
+func NewGetExampleUseCase(repo port.ExampleRepository) *GetExampleUseCase {
+	return &GetExampleUseCase{repo: repo}
+}
+
+// Execute busca el example. Fallos: EXAMPLE_NOT_FOUND (404).
+func (uc *GetExampleUseCase) Execute(ctx context.Context, q dto.GetExampleQuery) (result.Result[dto.ExampleData], error) {
+	example, found, err := uc.repo.FindByUUID(ctx, q.UUID)
+	if err != nil {
+		return result.FromError[dto.ExampleData](fmt.Errorf("buscar example %s: %w", q.UUID, err))
+	}
+	if !found {
+		return result.FromError[dto.ExampleData](apperr.ErrExampleNotFound)
+	}
+	return result.Ok(mapper.ToExampleData(example)), nil
+}

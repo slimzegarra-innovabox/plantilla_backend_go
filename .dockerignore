@@ -1,0 +1,31 @@
+# Nunca entran en el contexto de build (y por lo tanto en una imagen)
+.env
+.env.*
+!.env.template
+*.pem
+*.key
+
+# Control de versiones, IDE y herramientas locales
+.git
+.github
+.claude
+.vscode
+.idea
+.ai_context
+
+# Artefactos locales
+tmp/
+/main
+*.log
+*.out
+coverage*
+
+# No se necesitan para compilar
+docs/
+compose/
+*.md
+develop.yml
+test.yml
+quality.yml
+production.yml
+sbom/

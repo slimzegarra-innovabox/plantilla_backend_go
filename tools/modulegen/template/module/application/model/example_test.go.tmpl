@@ -1,0 +1,48 @@
+package model_test
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"myapp.v1.0.0/internal/example/application/apperr"
+	"myapp.v1.0.0/internal/example/application/model"
+)
+
+var now = time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+
+func TestNewExample(t *testing.T) {
+	by := uuid.New()
+
+	e, err := model.NewExample("  Demo  ", by, now)
+
+	require.NoError(t, err)
+	assert.Equal(t, "Demo", e.Name())
+	assert.Equal(t, 1, e.Version())
+	assert.Equal(t, by, e.CreatedBy())
+	assert.Equal(t, uuid.Version(7), e.UUID().Version())
+}
+
+func TestNameRules(t *testing.T) {
+	for _, bad := range []string{"", "   ", strings.Repeat("x", 151)} {
+		_, err := model.NewExample(bad, uuid.New(), now)
+		assert.ErrorIs(t, err, apperr.ErrExampleNameInvalid)
+	}
+	e, err := model.NewExample("Demo", uuid.New(), now)
+	require.NoError(t, err)
+	assert.ErrorIs(t, e.Rename("", now), apperr.ErrExampleNameInvalid)
+	assert.Equal(t, "Demo", e.Name(), "un cambio rechazado no toca el nombre")
+}
+
+func TestCanBeManagedBy(t *testing.T) {
+	e, err := model.NewExample("Demo", uuid.New(), now)
+	require.NoError(t, err)
+
+	assert.NoError(t, e.CanBeManagedBy(e.CreatedBy(), false), "el creador")
+	assert.NoError(t, e.CanBeManagedBy(uuid.New(), true), "un administrador")
+	assert.ErrorIs(t, e.CanBeManagedBy(uuid.New(), false), apperr.ErrExampleForbidden, "un tercero")
+}

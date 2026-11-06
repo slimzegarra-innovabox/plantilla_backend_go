@@ -1,0 +1,93 @@
+# Producción: imágenes distroless sin root contra una base de datos externa.
+#
+#   docker compose -f production.yml run --rm app_migrate      # 1. migraciones
+#   docker compose -f production.yml up -d --build              # 2. nueva versión
+#
+# Variables: archivo indicado en ENV_FILE (por defecto .env.prod), nunca versionado;
+# mejor aún, inyectadas por el orquestador o un gestor de secretos.
+# Sin ~/.aws: credenciales del IAM Role. Sin herramientas de administración expuestas.
+
+name: myapp-prod
+
+x-env: &env
+  env_file:
+    - ${ENV_FILE:-.env.prod}
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp
+
+services:
+  app_migrate:
+    <<: [*env, *hardening]
+    build:
+      context: .
+      target: migrate
+    profiles: ["migrate"]
+    environment:
+      APP_ENV: production
+    restart: "no"
+
+  app_backend:
+    <<: [*env, *hardening]
+    build:
+      context: .
+      target: api
+    environment:
+      APP_ENV: production
+      REDIS_ADDR: app_redis:6379
+    ports:
+      - "8080:8080"
+    stop_grace_period: 45s            # > HTTP_DRAIN_DELAY + HTTP_SHUTDOWN_TIMEOUT (5s + 30s)
+    restart: unless-stopped
+
+  # Procesa tareas de Asynq (REDIS_ENABLED) y/o mensajes de SQS (SQS_ENABLED).
+  app_worker:
+    <<: [*env, *hardening]
+    build:
+      context: .
+      target: worker
+    environment:
+      APP_ENV: production
+      REDIS_ADDR: app_redis:6379
+    stop_grace_period: 75s            # > max(WORKER_SHUTDOWN_TIMEOUT, SQS_VISIBILITY_TIMEOUT) = 60s
+    depends_on:
+      app_redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Colector de telemetría → X-Ray (trazas) y CloudWatch (métricas). Opcional:
+  #   docker compose -f production.yml --profile otel up -d
+  # y en ENV_FILE: OTEL_ENABLED=true, OTEL_EXPORTER_OTLP_ENDPOINT=http://app_otel:4318.
+  # Usa el IAM Role de la instancia: con IMDSv2, el hop limit debe ser 2 para que un
+  # contenedor alcance las credenciales. En ECS se corre como sidecar (ver CLAUDE.md §11).
+  app_otel:
+    <<: *hardening
+    image: public.ecr.aws/aws-observability/aws-otel-collector:v0.51.0@sha256:955e240b27d7fd3c7995fd937db4b963975948eb553f656d8c37a564e5b5e07d
+    profiles: ["otel"]
+    command: ["--config", "/etc/otel/adot-collector.yaml"]
+    volumes:
+      - ./deploy/otel/adot-collector.yaml:/etc/otel/adot-collector.yaml:ro
+    restart: unless-stopped
+
+  app_redis:
+    image: redis:7.4.12-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+    # Con contraseña (REDIS_PASSWORD de ENV_FILE); sin TLS porque solo es accesible
+    # en la red interna de compose: ENV_FILE debe llevar REDIS_TLS=false.
+    # Con un Redis gestionado (ElastiCache), quitar este servicio y usar TLS.
+    <<: *env
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  redis_data:

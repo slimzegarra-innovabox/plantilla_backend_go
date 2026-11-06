@@ -1,0 +1,57 @@
+# Pruebas de integración sin Go instalado en la máquina: PostgreSQL y Redis efímeros +
+# un contenedor que ejecuta la suite completa contra él.
+#
+#   docker compose -f test.yml run --rm tests ; docker compose -f test.yml down
+#
+# El código de salida es el de `go test`. Con Go local, `make test-integration`
+# hace lo mismo sin este archivo.
+
+name: myapp-test
+
+services:
+  tests:
+    build:
+      context: .
+      target: deps
+    working_dir: /src
+    volumes:
+      - .:/src:ro
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/root/.cache/go-build
+    environment:
+      TEST_DATABASE_URL: postgres://test:test@postgres_test:5432/test?sslmode=disable
+      TEST_REDIS_ADDR: redis_test:6379
+      GOFLAGS: -buildvcs=false
+    # Sin -race: la imagen compila con CGO_ENABLED=0 (el CI sí corre con -race).
+    command: ["go", "test", "-tags", "integration", "-count=1", "-p", "1", "./..."]
+    depends_on:
+      postgres_test:
+        condition: service_healthy
+      redis_test:
+        condition: service_healthy
+
+  redis_test:
+    image: redis:7.4.12-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres_test:
+    image: postgres:16.15-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    tmpfs:
+      - /var/lib/postgresql/data       # efímera: cada ejecución empieza vacía
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  go_mod_cache:
+  go_build_cache:

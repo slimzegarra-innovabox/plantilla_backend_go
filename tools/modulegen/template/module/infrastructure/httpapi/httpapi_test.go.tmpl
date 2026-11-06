@@ -1,0 +1,222 @@
+package httpapi_test
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"myapp.v1.0.0/internal/example"
+	"myapp.v1.0.0/internal/example/application/port/porttest"
+	"myapp.v1.0.0/internal/example/infrastructure/httpapi"
+	"myapp.v1.0.0/internal/shared/infrastructure/config"
+	sharedhttp "myapp.v1.0.0/internal/shared/infrastructure/httpapi"
+	"myapp.v1.0.0/internal/shared/infrastructure/httpapi/openapitest"
+	"myapp.v1.0.0/internal/shared/infrastructure/idempotency/idempotencytest"
+	"myapp.v1.0.0/internal/shared/infrastructure/module"
+	"myapp.v1.0.0/internal/shared/infrastructure/security"
+)
+
+var jwtCfg = config.JWTConfig{
+	Secret: "0123456789abcdef0123456789abcdef", Issuer: "https://auth.example.com",
+	Audience: "myapp-api", Leeway: 30 * time.Second,
+}
+
+type fixedClock struct{}
+
+func (fixedClock) Now() time.Time { return time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC) }
+
+// server arma el router real con el mismo cableado de producción (example.RegisterWith).
+type server struct {
+	engine *gin.Engine
+	repo   *porttest.InMemoryExampleRepository
+	user   uuid.UUID
+}
+
+func newServer(t *testing.T) *server {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	engine, err := sharedhttp.NewEngine(sharedhttp.EngineOptions{
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BodyLimitBytes: 1 << 20,
+	})
+	require.NoError(t, err)
+	repo := porttest.NewInMemoryExampleRepository()
+	example.RegisterWith(engine.Group("/api/v1"), module.Deps{
+		Clock:      fixedClock{},
+		Auth:       sharedhttp.NewAuthenticator(security.NewJWTVerifier(jwtCfg)),
+		Idempotent: sharedhttp.Idempotent(idempotencytest.NewMemory()),
+	}, example.Ports{Repo: repo})
+	return &server{engine: engine, repo: repo, user: uuid.New()}
+}
+
+func (s *server) token(t *testing.T, user uuid.UUID, scopes ...string) string {
+	t.Helper()
+	tok, err := security.SignForTesting(jwtCfg, user, scopes, time.Hour)
+	require.NoError(t, err)
+	return tok
+}
+
+func (s *server) writer(t *testing.T) string {
+	t.Helper()
+	return s.token(t, s.user, httpapi.ScopeRead, httpapi.ScopeWrite)
+}
+
+// do ejecuta la petición y valida la respuesta contra el contrato (docs/openapi.yaml).
+func (s *server) do(t *testing.T, method, path, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	s.engine.ServeHTTP(w, req)
+	openapitest.ValidateResponse(t, req, w)
+	return w
+}
+
+func data(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var env struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env), w.Body.String())
+	return env.Data
+}
+
+func code(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var env struct {
+		Notifications []struct {
+			Code string `json:"code"`
+		} `json:"notifications"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env), w.Body.String())
+	require.NotEmpty(t, env.Notifications, w.Body.String())
+	return env.Notifications[0].Code
+}
+
+func (s *server) create(t *testing.T, name string) string {
+	t.Helper()
+	w := s.do(t, http.MethodPost, "/api/v1/examples", s.writer(t), `{"name":"`+name+`"}`)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	return data(t, w)["uuid"].(string)
+}
+
+func TestCreate(t *testing.T) {
+	s := newServer(t)
+
+	w := s.do(t, http.MethodPost, "/api/v1/examples", s.writer(t), `{"name":"Demo"}`)
+
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	got := data(t, w)
+	assert.Equal(t, "/api/v1/examples/"+got["uuid"].(string), w.Header().Get("Location"))
+	assert.Equal(t, s.user.String(), got["created_by"], "el autor sale del token")
+	assert.NotContains(t, w.Body.String(), `"id"`, "nunca se expone el id numérico")
+}
+
+func TestCreateFailures(t *testing.T) {
+	s := newServer(t)
+	s.create(t, "Demo")
+
+	assert.Equal(t, "EXAMPLE_NAME_TAKEN", code(t, s.do(t, http.MethodPost, "/api/v1/examples", s.writer(t), `{"name":"demo"}`)))
+	assert.Equal(t, http.StatusBadRequest, s.do(t, http.MethodPost, "/api/v1/examples", s.writer(t), `{}`).Code)
+	assert.Equal(t, http.StatusUnauthorized, s.do(t, http.MethodPost, "/api/v1/examples", "", `{"name":"x y"}`).Code)
+	reader := s.token(t, s.user, httpapi.ScopeRead)
+	assert.Equal(t, http.StatusForbidden, s.do(t, http.MethodPost, "/api/v1/examples", reader, `{"name":"x y"}`).Code)
+}
+
+func TestGetAndList(t *testing.T) {
+	s := newServer(t)
+	id := s.create(t, "Demo")
+	reader := s.token(t, uuid.New(), httpapi.ScopeRead)
+
+	w := s.do(t, http.MethodGet, "/api/v1/examples/"+id, reader, "")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Demo", data(t, w)["name"])
+
+	w = s.do(t, http.MethodGet, "/api/v1/examples/"+uuid.NewString(), reader, "")
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "EXAMPLE_NOT_FOUND", code(t, w))
+
+	assert.Equal(t, http.StatusBadRequest, s.do(t, http.MethodGet, "/api/v1/examples/no-es-uuid", reader, "").Code)
+
+	w = s.do(t, http.MethodGet, "/api/v1/examples?page=1&size=10", reader, "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"total_elements":1`)
+}
+
+func TestUpdate(t *testing.T) {
+	s := newServer(t)
+	id := s.create(t, "Demo")
+	path := "/api/v1/examples/" + id
+
+	w := s.do(t, http.MethodPut, path, s.writer(t), `{"name":"Nuevo","version":1}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.EqualValues(t, 2, data(t, w)["version"])
+
+	w = s.do(t, http.MethodPut, path, s.writer(t), `{"name":"Otro","version":1}`)
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "EXAMPLE_VERSION_CONFLICT", code(t, w))
+}
+
+func TestOnlyOwnerOrAdminCanWrite(t *testing.T) {
+	s := newServer(t)
+	id := s.create(t, "Ajeno")
+	path := "/api/v1/examples/" + id
+	stranger := s.token(t, uuid.New(), httpapi.ScopeRead, httpapi.ScopeWrite)
+	admin := s.token(t, uuid.New(), httpapi.ScopeRead, httpapi.ScopeWrite, httpapi.ScopeAdmin)
+
+	for _, w := range []*httptest.ResponseRecorder{
+		s.do(t, http.MethodPut, path, stranger, `{"name":"Robado","version":1}`),
+		s.do(t, http.MethodDelete, path, stranger, ""),
+	} {
+		require.Equal(t, http.StatusForbidden, w.Code)
+		assert.Equal(t, "EXAMPLE_FORBIDDEN", code(t, w))
+	}
+	require.Equal(t, http.StatusNoContent, s.do(t, http.MethodDelete, path, admin, "").Code, "un administrador sí")
+}
+
+func TestDelete(t *testing.T) {
+	s := newServer(t)
+	path := "/api/v1/examples/" + s.create(t, "Borrable")
+
+	w := s.do(t, http.MethodDelete, path, s.writer(t), "")
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	assert.Empty(t, w.Body.String(), "204 sin cuerpo")
+
+	w = s.do(t, http.MethodDelete, path, s.writer(t), "")
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "EXAMPLE_NOT_FOUND", code(t, w))
+}
+
+func TestCreateWithIdempotencyKeyCreatesOnce(t *testing.T) {
+	s := newServer(t)
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/examples", strings.NewReader(`{"name":"Demo"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+s.writer(t))
+		req.Header.Set(sharedhttp.HeaderIdempotencyKey, "op-1")
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, req)
+		openapitest.ValidateResponse(t, req, w)
+		return w
+	}
+
+	first, retry := post(), post()
+
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+	require.Equal(t, http.StatusCreated, retry.Code)
+	assert.Equal(t, 1, s.repo.Calls["Create"], "se creó una sola vez")
+	assert.Equal(t, "true", retry.Header().Get(sharedhttp.HeaderIdempotencyReplayed))
+}

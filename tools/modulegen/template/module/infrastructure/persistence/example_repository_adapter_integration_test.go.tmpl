@@ -1,0 +1,23 @@
+//go:build integration
+
+package persistence_test
+
+import (
+	"os"
+	"testing"
+
+	"myapp.v1.0.0/internal/example/application/port"
+	"myapp.v1.0.0/internal/example/application/port/porttest"
+	"myapp.v1.0.0/internal/example/infrastructure/persistence"
+	"myapp.v1.0.0/internal/shared/infrastructure/persistence/pgtest"
+)
+
+func TestMain(m *testing.M) { os.Exit(pgtest.Main(m)) }
+
+func TestExampleRepositoryAdapterContract(t *testing.T) {
+	porttest.RunExampleRepositoryContract(t, func(t *testing.T) port.ExampleRepository {
+		t.Helper()
+		pgtest.Truncate(t, "examples")
+		return persistence.NewExampleRepositoryAdapter(pgtest.DB(t))
+	})
+}
